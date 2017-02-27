@@ -1,0 +1,22 @@
+{
+	"name" : "link-spider",
+	"description" : "a link spider for https check",
+	"tags" : ["dom","javascript","xmldom", "spider"],
+	"version" : "0.1.0",
+	"author" : "jindw <jindw@xidea.org>",
+	"repository" :{
+		"type" : "git",
+		"url" : "http://github.com/jindw/link-spider.git"
+	},
+	"bugs" :{ "web" : "http://github.com/jindw/link-spider/issues" },
+	"engines" : ["node >= 0.6.4"],
+	"main" : "./main",
+	"dependencies": {
+		"mongodb":"*",
+		"request" : "*",
+		"xmldom" : "*",
+		"routes" : "*",
+		"cookiejar": "*",
+		'iconv-lite':"*",
+  }
+}
