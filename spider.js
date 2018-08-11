@@ -1,15 +1,14 @@
 var request = require('request')
 	, http = require('http')
 	, fs = require('fs')
-	, xmldom = require('xmldom')
 	, urlParse = require('url').parse
-	, urlResolve = require('url').resolve
 	, routes = require('routes')
-	, events = require('events')
-	, util = require('util')
 	, iconv = require('iconv-lite')
 	, cookiejar = require('cookiejar')
 	;
+var html = require('./html');
+var MongoCache = require('./cache').MongoCache;
+var MemeryCache = require('./cache').MemeryCache
 
 var defaultHeaders = 
 	{ 'accept': "application/xml,application/xhtml+xml,text/html;q=0.9,text/plain;q=0.8,image/png,*/*;q=0.5"
@@ -18,14 +17,8 @@ var defaultHeaders =
 	}
 
 var firefox = "Mozilla/5.0 (iPhone; CPU iPhone OS 8_0 like Mac OS X) AppleWebKit/600.1.3 (KHTML, like Gecko) Version/8.0 Mobile/12A4345d Safari/600.1.4"
-
-var copy = function (obj) {
-	var n = {}
-	for (i in obj) {
-		n[i] = obj[i];
-	}
-	return n
-}
+var spider = firefox + ' spider';
+firefox = spider
 
 var debug = 1
 	, info = 50
@@ -33,19 +26,12 @@ var debug = 1
 	;
 var logLevels = {debug:debug, info:info, error:error, 1:'debug', 50:'info', 100:'error'}
 
-var noCache ={
-	get : function (url, cb) { cb(null,null) },
-	set : function (url, headers, body) {},
-	getHeaders : function (url, cb) {cb(null)}
-};
-
 function Spider (options) {
 	this.update = options.update || true
 	this.maxSockets = options.maxSockets || 4;
 	this.requestInterval = options.requestInterval || 500;
 	this.userAgent = options.userAgent || firefox;
 	this.minTTL = options.minTTL;
-	this.cache = options.cache || new MongoCache('mongodb://localhost:27017/http-cache');
 	this.pool = options.pool || {maxSockets: this.maxSockets};
 	this.options = options;
 	this.currentUrl = null;
@@ -55,47 +41,50 @@ function Spider (options) {
 	this.runUrls = [];
 	this.taskCount = 0;
 	this.cookie = cookiejar.CookieJar();
-	if(/^mongodb:\/\//.test(this.cache)){
-		this.cache = new MongoCache('mongodb://localhost:27017/http-cache')
+	if(/^mongodb:\/\//.test(options.cache)){
+		this.cache = new MongoCache(options.cache)
+	}else{
+		this.cache = options.cache || new MemeryCache();
 	}
 }
-util.inherits(Spider, events.EventEmitter)
 Spider.prototype.get = function (url, referer) {
 	function getRequestHeader(){
-		var headers = copy(defaultHeaders);
+		var reqHeaders = Object.create(defaultHeaders);
 		url = url.replace(/#.*/,'');
 		if (spider.urls.indexOf(url) !== -1) {
 			// Already handled this request
-			spider.emit('log', debug, 'Already received one get request for '+url+'. skipping.')
+			console.info('Already received one get request for '+url+'. skipping.')
 			return;
 		} 
 		var u = urlParse(url);
 		//console.log(u,url)
 		var path = u.href.slice(u.href.indexOf(u.host)+u.host.length);
 		if (!spider.routers[u.host]) {
-			spider.emit('log', debug, 'No routes for host: '+u.host+'. skipping.')
+			console.info( 'No routes for host: '+u.host+'. skipping.')
 			return;
 		}
 		spider.urls.push(url);
 		//console.log(this.routers[u.host],'\n\n',u.href.slice(u.href.indexOf(u.host)+u.host.length))
 		if (!spider.routers[u.host].match(path)) {
-			spider.emit('log', debug, 'No routes for path '+path+'. skipping.')
+			console.warn( 'No routes for path '+path+'. skipping.')
 			return;
 		}
 		
 		spider.taskCount ++;
-		if (referer) headers.referer = referer;
-		headers['user-agent'] = spider.userAgent;
+		if (referer) reqHeaders.referer = referer;
+		reqHeaders['user-agent'] = spider.userAgent;
 		var cookies = spider.cookie.getCookies(cookiejar.CookieAccessInfo(u.host, u.pathname));
 		if (cookies) {
-			headers.cookie = cookies.join(";");
+			reqHeaders.cookie = cookies.join(";");
 		}
-		return headers;
+		return reqHeaders;
 	}
 	referer = referer || this.currentUrl;	
 	var spider = this;
-	var headers = getRequestHeader();
-	headers && this.cache.getHeaders(url, function (cachedHeaders) {
+	var reqHeaders = getRequestHeader();
+	//console.log(url,JSON.stringify(reqHeaders))
+	reqHeaders && this.cache.getHeaders(url, function (cachedHeaders) {
+		
 		if (cachedHeaders) {
 			var update = spider.update;
 			if(update && cachedHeaders.expires){
@@ -108,87 +97,90 @@ Spider.prototype.get = function (url, referer) {
 			//update = false;
 			//console.log(update)
 			if(!update){
-				spider.cache.get(url, function (headers,body) {
+				spider.cache.get(url, function (respHeaders,body) {
 					//console.log(url,'@@@load  cache:',body == null)
-					handlerSpiderResponse(spider, headers, body,url, referer, true)
+					handlerSpiderResponse(spider, respHeaders, body,url, referer, true)
 					spider.completeTask();
 				});
 				return;
 			}
 			if (cachedHeaders['last-modifed']) {
-				headers['if-modified-since'] = cachedHeaders['last-modified'];
+				reqHeaders['if-modified-since'] = cachedHeaders['last-modified'];
 			}
 			if (cachedHeaders.etag) {
-				headers['if-none-match'] = cachedHeaders.etag;
+				reqHeaders['if-none-match'] = cachedHeaders.etag;
 			}
 			
 		}
-		doRequest(spider,url,headers,referer)
+		doRequest(spider,url,reqHeaders,referer)
 	});
 	return this;
 }
-function doRequest(spider,url,headers,referer){
+function doRequest(spider,url,reqHeaders,referer){
 	var waitUrls = spider.waitUrls;
 	var runUrls = spider.runUrls;
 	if(url){
 		if(runUrls.length){//single run url
-			waitUrls.push(url,headers,referer);
+			waitUrls.push(url,reqHeaders,referer);
 			return ;
 		}
 	}else{
 		referer = waitUrls.pop();
-		headers = waitUrls.pop();
+		reqHeaders = waitUrls.pop();
 		url = waitUrls.pop();
 		if(!url){
 			return;
 		}
 	}
 	runUrls.push(url)
-	console.info('send request:',url,';wait:',waitUrls.length)
+	//console.info('send request:',url,';wait:',[runUrls.length,waitUrls.length])
 	
-	
-	
-	doGet(spider,url,headers,function (e, resp, body) {
+	doGet(spider,url,reqHeaders,function (e, resp, body) {
+		
+		if (e) {
+			console.error( url+'\t'+e);
+			return;
+		}
+		//TODO:cache control
+		//console.log('do get' ,url)
+		var respHeaders = resp.headers;
 		if (resp && (resp.statusCode == 301 || resp.statusCode == 302)) {
 			//console.log(resp.headers,headers.location)
-			doGet(spider,resp.headers.location,headers,arguments.callee);
+			doGet(spider,respHeaders.location,respHeaders,arguments.callee);
 			return;
 		}
 		
 		var i = runUrls.indexOf(url);
 		runUrls.splice(i,1)
 		doRequest(spider);
-		spider.emit('log', debug, 'Response received for '+url+'.')
-		if (e) {
-			spider.emit('log', error, url+'\t'+e);
-			return;
-		}
+		console.info( 'Response received for '+url+'.')
 		if (resp.statusCode === 304) {
-			spider.cache.get(url, function (headers,body) {
-				handlerSpiderResponse(spider, headers, body,url, referer, true);
+			spider.cache.get(url, function (respHeaders,body) {
+				handlerSpiderResponse(spider, respHeaders, body,url, referer, true);
 				spider.completeTask();
 			});
 			return;
 		} else if (resp.statusCode !== 200) {
-			spider.emit('log', debug, 'Request did not return 200. '+resp.statusCode+' returned \t'+url);
+			console.info( 'Request did not return 200. '+resp.statusCode+' returned \t'+url);
 			spider.completeTask();
 			return;
 		//} else if (!resp.headers['content-type'] || resp.headers['content-type'].indexOf('html') === -1) {
-		//	spider.emit('log', debug, 'Content-Type does not match. '+url);
+		//	console.info( 'Content-Type does not match. '+url);
 		//	spider.completeTask();
 		//	return;
 		}
-		if (resp.headers['set-cookie']) {
-			try { spider.cookie.setCookies(resp.headers['set-cookie']) }
+		if (respHeaders['set-cookie']) {
+			try { spider.cookie.setCookies(respHeaders['set-cookie']) }
 			catch(e) {}
 		}
-		//console.log(headers,resp.headers)
-		spider.cache.set(url, resp.headers, body);
-		handlerSpiderResponse(spider, resp.headers, body,url, referer, false);
+		//console.log(resp.headers)
+		
+		spider.cache.set(url, respHeaders, body);
+		handlerSpiderResponse(spider, respHeaders, body,url, referer, false);
 		spider.completeTask();
 	})
 }
-function doGet(spider,url,headers,callback){
+function doGet(spider,url,reqHeaders,callback){
 	var isJD = /^http:\/\/\w+\.jd\.com\//.test(url)
 	if(isJD || /.(?:jpg|mp3)$/.test(url)){
 		var buf;
@@ -206,7 +198,7 @@ function doGet(spider,url,headers,callback){
 			port: m[3]||80,
 			path: m[4],
 			method: 'GET',
-			headers: headers
+			headers: reqHeaders
 		};
 		(m[1] == 'http'?http:https).get(options, function(res) {
 			//res.setEncoding('utf8');
@@ -222,7 +214,8 @@ function doGet(spider,url,headers,callback){
 			callback(e,res)
 		});
 	}else{
-		request.get({url:url, headers:headers, pool:spider.pool}, callback);
+		//console.log({url:url, headers:reqHeaders, pool:spider.pool},callback)
+		request.get({url:url, headers:reqHeaders, pool:spider.pool}, callback);
 	}
 	
 }
@@ -232,183 +225,51 @@ Spider.prototype.route = function (hosts, pattern, cb) {
 		hosts = [hosts];
 	}
 	hosts.forEach(function (host) {
-		if (!spider.routers[host]) spider.routers[host] = new routes.Router();
-		spider.routers[host].addRoute(pattern, cb);
+		var router = spider.routers[host];
+		if (!router) {
+			router = spider.routers[host] = new routes.Router();
+		}
+		if(pattern instanceof Array){
+			pattern.forEach(function(pattern){
+				router.addRoute(pattern, cb);
+			})
+		}else{
+			router.addRoute(pattern, cb);
+		}
+		
 	})
 	return spider;
 }
- function handlerSpiderResponse(spider,headers,body,url, referer,fromCache) {
+ function handlerSpiderResponse(spider,respHeaders,body,url, referer,fromCache) {
 	var u = urlParse(url);
  	//console.log(url)
  	//return null;
 	if (spider.routers[u.host]) {
 		var path = u.href.slice(u.href.indexOf(u.host)+u.host.length);
 		var r = spider.routers[u.host].match(path);
-		r.spider = spider;
-		r.headers = headers
-		r.body = body
-		r.url = u;
-		r.fromCache = fromCache;
-		var selector ;
-		function initSelector(){
-			if(!selector){
-				selector = buildSelector(body)
-			}
-			return selector;
-		}
-		
-		function $(selector,basenode){
-			//console.log('selector:',selector,'$$$',basenode)
-			var list = initSelector().select(selector,basenode) ||[];
-			list.each = function(fn){
-				for(var i=0;i<list.length;i++){
-					fn(i,list[i]);
-				}
-			}
-			list.spider = function(replace){
-				var c = 0;
-				list.each(function(i,p){
-					var href= p.getAttribute('href') || p.getAttribute('src');
-					if(href && !/^\s*javascript\:/.test(href)){
-						if (!/^https?:/.test(href)) {
-							href = urlResolve(url, href);
-						}
-						
-						if(replace){
-							href = replace(href)
-						}
-						c++;
-						spider.get(href,url);
-					}else{
-						//console.log('@@',href)
-					}
-				})
-				return c;
-			}
-			return list;
-		}
+		var $ = html(spider,body,url);
+		//r.headers = respHeaders
+		//r.fromCache = fromCache;
 		spider.currentUrl = url;
-		r.fn.call(r, body, $);
+		r.fn.call(spider,url,respHeaders, body, fromCache,$);
 		spider.currentUrl = null;
 	}	
-}
-function buildSelector(body){
-	var docParser = new xmldom.DOMParser({errorHandler:function(level,msg){}});
-	var doc = docParser.parseFromString(body,'text/html');
-	if(!doc){
-		console.log('invalid doc',body)
-	}
-	var elementPrototype = doc.documentElement.constructor.prototype;
-	if(!('innerHTML' in elementPrototype)){
-		Object.defineProperty(elementPrototype,'innerHTML',{
-			get:function(){
-				return this.childNodes.toString();
-			}
-		})
-		Object.defineProperty(elementPrototype,'outerHTML',{
-			get:function(){
-				return this.toString();
-			}
-		})
-	}
-	doc.getAttributeNode = function(){
-		return this.documentElement.getAttributeNode.apply(this.documentElement,arguments);
-	}
-	//console.log(root)
-	var nwmatcher = require('nwmatcher');
-	var selector = nwmatcher({document:doc});
-	selector.configure( { USE_QSAPI: false, VERBOSITY: true } );
-	return selector;
-}
-Spider.prototype.log = function (level) {
-	if (typeof level === 'string'){
-		level = logLevels[level];
-	}
-	this.on('log', function (l, text) {
-		if (l >= level) {
-			console.log('['+(logLevels[l] || l)+']', text)
-		}
-	})
-	return this;
-}
-Spider.prototype.ok = function(callback){
-	this.on('ok',callback);
-	return this;
 }
 
 Spider.prototype.completeTask = function(){
 	this.taskCount --;
+	//console.log('taskCount:%s',this.taskCount)
 	if(this.taskCount <1){
-		this.emit('ok',this.urls);
+		if(this.ok){
+			this.ok(this.urls);
+		}
+		if(this.cache && this.cache.close instanceof Function){
+			this.cache.close();
+		}
 	}
 	return this;
 };
 
-function MongoCache(dburl){
-	this.dburl = dburl || 'mongodb://localhost:27017/http-cache';
-}
-
-MongoCache.prototype = {
-	execute:function(url,type,args){
-		var thiz = this;
-		if(thiz.err){
-			//console.warn('mongo cache error:',thiz.err);
-			thiz.err = null;
-		}else if(this.db){
-			var collection = this.db.collection('spider');
-			var getAll = type == 'get';
-			var fields = {headers:1};
-			if(getAll && (fields.body=1) || type == 'getHeaders'){
-				collection.findOne({url:url},{fields:fields},
-					function(err,result){
-						if(result){
-							//console.log(url,type,getAll,fields,result.body == null)
-							args(result.headers,result.body)
-						}else{
-							args();
-						}
-						thiz.closed && thiz.close();
-					});
-			}else{//put
-				//collection.save({url:url,headers:arg1,body:arg2},callback);
-				//if(!arg2){console.error('cache body is null',url);}
-				collection.updateOne({url:url}, {$set:args}, {upsert:true,w:1},callback);
-				function callback(err,data){
-					//console.log("save cache:",url)
-					//collection.findOne({url:url},{fields:{body:1}},function(err,result){console.log('saved data:',url,result.body.length);});
-					thiz.closed && thiz.close();
-				};
-			}
-		}else{
-			console.log('init database:',this.dburl);
-			var MongoClient = require('mongodb').MongoClient;
-			MongoClient.connect(this.dburl, function(err, db) {
-				thiz.err = err;
-				thiz.db = db;
-				thiz.execute(url,type,args);
-			});
-		}
-	},
-	close:function(){
-		console.log('close db!')
-		this.closed = true;
-		if(this.db){
-			this.db.close();
-			this.db = null;
-		}
-	},
-	get : function (url, callback) { 
-		this.execute(url,'get',callback);
-	},
-	set : function (url, headers, body) {
-		this.execute(url,'set',{headers:headers,body:body});
-	},
-	getHeaders : function (url, callback) {
-		//console.log('get headers:',url)
-		this.execute(url,'getHeaders',callback);
-	}
-};
-module.exports = function (options) {return new Spider(options || {})}
-module.exports.MongoCache = MongoCache;
+module.exports =  Spider
 
 

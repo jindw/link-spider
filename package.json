@@ -17,6 +17,6 @@
 		"xmldom" : "*",
 		"routes" : "*",
 		"cookiejar": "*",
-		'iconv-lite':"*",
-  }
+		"iconv-lite":"*"
+	}
 }
