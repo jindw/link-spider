@@ -34,16 +34,20 @@ var logLevels = {debug:debug, info:info, error:error, 1:'debug', 50:'info', 100:
 
 var oneCache ={
 	get : function (url, cb) { 
-		if(url == this.value[0]){
+		if(url == this.value && this.value[0]){
 			cb(this.value[1],this.value[2]) 
+		}else{
+			cb()
 		}
 	},
 	set : function (url, headers, body) {
 		this.value = [url,headers,body]
 	},
 	getHeaders : function (url, cb) {
-		if(url == this.value[0]){
+		if(url == this.value && this.value[0]){
 			cb(this.value[1]) 
+		}else{
+			cb(null)
 		}
 	}
 };
@@ -73,7 +77,23 @@ Looper.prototype.get = function (url, callback,referer) {
 		return headers;
 	}
 	var headers = getRequestHeader();
-	doRequest(this,url,callback,headers,this.referer);
+	if(this.cache ){
+		this.cache.getHeaders(url,(cachedHeaders)=>{
+			if(cachedHeaders){
+				if (cachedHeaders['last-modifed']) {
+					headers['if-modified-since'] = cachedHeaders['last-modified'];
+				}
+				if (cachedHeaders.etag) {
+					headers['if-none-match'] = cachedHeaders.etag;
+				}
+			}
+			
+			doRequest(this,url,callback,headers,this.referer);
+
+		})
+	}else{
+		doRequest(this,url,callback,headers,this.referer);
+	} 
 	return this;
 }
 function doRequest(spider,url,callback,headers,referer){
