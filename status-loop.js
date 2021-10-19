@@ -1,6 +1,7 @@
 var request = require('request')
 	, http = require('http')
 	, fs = require('fs')
+	, os = require('os')
 	, xmldom = require('xmldom')
 	, urlParse = require('url').parse
 	, urlResolve = require('url').resolve
@@ -17,7 +18,8 @@ var defaultHeaders =
 	, 'accept-charset':	'utf-8;q=0.7,*;q=0.3'
 	}
 
-var firefox = "Mozilla/5.0 (iPhone; CPU iPhone OS 8_0 like Mac OS X) AppleWebKit/600.1.3 (KHTML, like Gecko) Version/8.0 Mobile/12A4345d Safari/600.1.4"
+var firefox = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.71 Safari/537.36"
+
 
 var copy = function (obj) {
 	var n = {}
@@ -51,11 +53,17 @@ var oneCache ={
 		}
 	}
 };
-function Looper(){
+function Looper(url){
 	this.userAgent = firefox;
 	this.cookie = cookiejar.CookieJar();
 	this.referer = null
 	this.cache = oneCache;
+	this.initUrl = url;
+	var u = urlParse(url);
+	this.cookie.setCookies(defaultCookie.split(/\s*;\s*/),u.host,u.pathname) ;
+
+	var cookies2 = this.cookie.getCookies(cookiejar.CookieAccessInfo(u.host, u.pathname));
+	//console.log(defaultCookie,'\n\n\n',cookies2.join(';'))
 }
 
 util.inherits(Looper, events.EventEmitter)
@@ -74,6 +82,7 @@ Looper.prototype.get = function (url, callback,referer) {
 		if (cookies) {
 			headers.cookie = cookies.join(";");
 		}
+		//console.log(headers)
 		return headers;
 	}
 	var headers = getRequestHeader();
@@ -127,8 +136,12 @@ function doRequest(spider,url,callback,headers,referer){
 		//	return;
 		}
 		if (resp.headers['set-cookie']) {
-			try { spider.cookie.setCookies(resp.headers['set-cookie']) }
-			catch(e) {}
+
+			try { 
+
+				var u = urlParse(url);
+				spider.cookie.setCookies(resp.headers['set-cookie'],u.host,u.pathname) 
+			}catch(e) {}
 		}
 		//console.log(headers,resp.headers)
 		spider.cache.set(url, resp.headers, body);
@@ -251,16 +264,52 @@ Looper.prototype.ok = function(callback){
 Looper.prototype.completeTask = function(){
 	this.taskCount --;
 	if(this.taskCount <1){
-		this.emit('ok',this.urls);
+		this.emit('ok',this.initUrl);
 	}
 	return this;
 };
-var looper = new Looper();
-setInterval(()=>{
-	looper.get('http://news.baidu.com',($,body)=>{
-		$('img').each((i,a)=>console.log(i,a+''))
+var defaultCookie =''
+var url0 ="http://www.baidu.com"
+var url0 ="http://news.baidu.com"
+
+
+var looper = new Looper(url0);
+var logFile = './log.txt'
+var logContent = '';
+var inc = 0;
+var status = 0;
+function loop(){
+	console.log('loop:',inc++)
+	looper.get(status ? url1: url0,($,body)=>{
+		if(status ){
+			var ss = $('.on_line').length;
+			if(ss ){
+				console.log('online:', new Date);
+				fs.appendFileSync(logFile,'online:'+(new Date().toLocaleString())+os.EOL);
+			}
+			status = 0;
+		}else{
+			var ts = $('.time');
+			if(ts ==0){
+				status = 1;
+			}else{
+				ts.each((i,a)=>{
+					if(i ==0){
+						var txt = a.firstChild.nodeValue;
+						console.log(new Date,txt+'');
+						if(txt != logContent){
+							fs.appendFileSync(logFile,(logContent = txt)+os.EOL);
+						}
+					}
+				})
+			}
+		}
+		
+		//console.log(body)
 	});
-},1000)
+}
+setInterval(loop,1000*60)
+loop();
 
 //module.exports = function (options) {return new Looper(options || {})}
 
