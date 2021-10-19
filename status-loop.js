@@ -55,7 +55,7 @@ function Looper(){
 }
 
 util.inherits(Looper, events.EventEmitter)
-Looper.prototype.get = function (url, referer) {
+Looper.prototype.get = function (url, callback,referer) {
 	var spider = this;
 	function getRequestHeader(){
 		var headers = copy(defaultHeaders);
@@ -73,10 +73,10 @@ Looper.prototype.get = function (url, referer) {
 		return headers;
 	}
 	var headers = getRequestHeader();
-	doRequest(this,url,headers,this.referer);
+	doRequest(this,url,callback,headers,this.referer);
 	return this;
 }
-function doRequest(spider,url,headers,referer){
+function doRequest(spider,url,callback,headers,referer){
 	
 	doGet(spider,url,headers,function (e, resp, body) {
 		if (resp && (resp.statusCode == 301 || resp.statusCode == 302)) {
@@ -93,7 +93,7 @@ function doRequest(spider,url,headers,referer){
 		}
 		if (resp.statusCode === 304) {
 			spider.cache.get(url, function (headers,body) {
-				handlerSpiderResponse(spider, headers, body,url, referer, true);
+				handlerSpiderResponse(spider, callback,headers, body,url, referer, true);
 				spider.completeTask();
 			});
 			return;
@@ -112,7 +112,7 @@ function doRequest(spider,url,headers,referer){
 		}
 		//console.log(headers,resp.headers)
 		spider.cache.set(url, resp.headers, body);
-		handlerSpiderResponse(spider, resp.headers, body,url, referer, false);
+		handlerSpiderResponse(spider, callback,resp.headers, body,url, referer, false);
 		spider.completeTask();
 	})
 }
@@ -154,7 +154,7 @@ function doGet(spider,url,headers,callback){
 	}
 	
 }
- function handlerSpiderResponse(spider,headers,body,url, referer,fromCache) {
+ function handlerSpiderResponse(spider,callback,headers,body,url, referer,fromCache) {
 	var u = urlParse(url);
  	//console.log(url)
  	//return null;
@@ -175,30 +175,11 @@ function doGet(spider,url,headers,callback){
 					fn(i,list[i]);
 				}
 			}
-			list.spider = function(replace){
-				var c = 0;
-				list.each(function(i,p){
-					var href= p.getAttribute('href') || p.getAttribute('src');
-					if(href && !/^\s*javascript\:/.test(href)){
-						if (!/^https?:/.test(href)) {
-							href = urlResolve(url, href);
-						}
-						
-						if(replace){
-							href = replace(href)
-						}
-						c++;
-						spider.get(href,url);
-					}else{
-						//console.log('@@',href)
-					}
-				})
-				return c;
-			}
 			return list;
 		}
 		spider.currentUrl = url;
-		$('img').each((i,a)=>console.log(i,a+''))
+		callback($,body)
+		//$('img').each((i,a)=>console.log(i,a+''))
 		//spider.callback( body, $);
 		spider.currentUrl = null;
 		
@@ -256,7 +237,9 @@ Looper.prototype.completeTask = function(){
 };
 var looper = new Looper();
 setInterval(()=>{
-	looper.get('http://news.baidu.com');
+	looper.get('http://news.baidu.com',($,body)=>{
+		$('img').each((i,a)=>console.log(i,a+''))
+	});
 },1000)
 
 //module.exports = function (options) {return new Looper(options || {})}
